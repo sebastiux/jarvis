@@ -1,4 +1,5 @@
 """JARVIS - backend mínimo: Maytapi webhook -> Grok -> respuesta por WhatsApp."""
+import asyncio
 import os
 
 import httpx
@@ -29,11 +30,73 @@ RECENT_REPLIES = set()
 
 
 @app.on_event("startup")
-def startup():
+async def startup():
     try:
         db.init_db()
     except Exception as e:
         print(f"WARN: no se pudo inicializar la BD al arrancar: {e}")
+    # Los self-chats no disparan webhook: hay que consultarlos periódicamente
+    if MY_PHONE and MAYTAPI_TOKEN:
+        asyncio.create_task(poll_self_chat())
+
+
+async def process_my_message(text: str):
+    """Procesa un mensaje mío y responde SOLO a MY_PHONE."""
+    if os.getenv("JARVIS_DISABLED", "").lower() in ("1", "true", "si"):
+        print("BLOQUEADO: interruptor JARVIS_DISABLED activo")
+        return
+    db.save_message(MY_PHONE, "user", text)
+    try:
+        reply = await ask_grok(MY_PHONE, text)
+    except Exception as e:
+        print(f"ERROR Grok: {e}")
+        reply = "Tuve un problema para pensar la respuesta. Intenta de nuevo en un momento."
+    db.save_message(MY_PHONE, "jarvis", reply)
+    await send_whatsapp(reply)
+
+
+def _extract_text(m: dict) -> str:
+    msg = m.get("message")
+    if isinstance(msg, dict):
+        return str(msg.get("text") or "").strip()
+    return str(m.get("text") or m.get("body") or "").strip()
+
+
+POLL_STATE = {"last_ts": None, "first_dump_done": False}
+
+
+async def poll_self_chat():
+    """Cada 10s revisa mi chat conmigo mismo y procesa mensajes nuevos."""
+    conv_id = f"{_digits(MY_PHONE)}@c.us"
+    url = f"https://api.maytapi.com/api/{MAYTAPI_PRODUCT_ID}/{MAYTAPI_PHONE_ID}/getMessages/{conv_id}"
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(url, headers={"x-maytapi-key": MAYTAPI_TOKEN})
+            data = r.json()
+            if isinstance(data, dict):
+                msgs = data.get("messages") or data.get("data") or []
+            else:
+                msgs = data
+            if not POLL_STATE["first_dump_done"]:
+                POLL_STATE["first_dump_done"] = True
+                print(f"POLL muestra inicial ({len(msgs)}): {str(msgs)[:500]}")
+            now = max((m.get("timestamp", 0) for m in msgs), default=0)
+            if POLL_STATE["last_ts"] is None:
+                POLL_STATE["last_ts"] = now
+                print(f"POLL init: {len(msgs)} mensajes previos ignorados")
+            else:
+                nuevos = [m for m in msgs if m.get("timestamp", 0) > POLL_STATE["last_ts"]]
+                for m in sorted(nuevos, key=lambda x: x.get("timestamp", 0)):
+                    POLL_STATE["last_ts"] = max(POLL_STATE["last_ts"], m.get("timestamp", 0))
+                    text = _extract_text(m)
+                    from_me = bool(m.get("fromMe", True))
+                    if from_me and text and text not in RECENT_REPLIES:
+                        print(f"POLL mensaje mío: {text[:100]}")
+                        await process_my_message(text)
+        except Exception as e:
+            print(f"POLL error: {e}")
+        await asyncio.sleep(10)
 
 
 @app.get("/")
@@ -110,31 +173,15 @@ async def webhook(request: Request):
     if not text:
         return {"ok": True}
 
-    # MODO SILENCIOSO: los mensajes de otras personas/grupos solo se guardan
-    # para que JARVIS los lea y detecte cosas (reuniones, pagos, etc.).
-    # JAMÁS generan respuesta hacia ese chat.
+    # MODO SILENCIOSO: los mensajes de otras personas/grupos (incluidos los
+    # que YO envío a otros, que llegan con fromMe=true y user=destinatario)
+    # solo se guardan para que JARVIS los lea. JAMÁS generan respuesta.
     if not _is_me(sender):
         chat_id = str(data.get("user", {}).get("id") or sender)
         db.save_message(chat_id, "observed", text)
         print(f"OBSERVADO (sin responder): chat={chat_id}")
         return {"ok": True}
 
-    # A partir de aquí el mensaje es MÍO (me escribo a mí mismo).
-    # REGLA DE SEGURIDAD ABSOLUTA: JARVIS solo habla conmigo.
-    # 1) Interruptor maestro. 2) Solo mi número dispara respuesta.
-    # 3) El envío siempre va a MY_PHONE, jamás al remitente.
-    if os.getenv("JARVIS_DISABLED", "").lower() in ("1", "true", "si"):
-        print("BLOQUEADO: interruptor JARVIS_DISABLED activo")
-        return {"ok": True}
-
-    db.save_message(MY_PHONE, "user", text)
-
-    try:
-        reply = await ask_grok(MY_PHONE, text)
-    except Exception as e:
-        print(f"ERROR Grok: {e}")
-        reply = "Tuve un problema para pensar la respuesta. Intenta de nuevo en un momento."
-
-    db.save_message(MY_PHONE, "jarvis", reply)
-    await send_whatsapp(reply)
+    # Si algún día Maytapi sí notifica mensajes de mi self-chat:
+    await process_my_message(text)
     return {"ok": True}
