@@ -65,6 +65,13 @@ def _extract_text(m: dict) -> str:
 POLL_STATE = {"last_ts": None, "first_dump_done": False}
 
 
+def _ts(m: dict) -> float:
+    try:
+        return float(m.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 async def poll_self_chat():
     """Cada 10s revisa mi chat conmigo mismo y procesa mensajes nuevos."""
     conv_id = f"{_digits(MY_PHONE)}@c.us"
@@ -73,29 +80,37 @@ async def poll_self_chat():
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.get(url, headers={"x-maytapi-key": MAYTAPI_TOKEN})
-            data = r.json()
+            try:
+                data = r.json()
+            except Exception:
+                print(f"POLL respuesta no-JSON: HTTP {r.status_code} {r.text[:200]}")
+                await asyncio.sleep(10)
+                continue
             if isinstance(data, dict):
                 msgs = data.get("messages") or data.get("data") or []
             else:
                 msgs = data
+            if isinstance(msgs, dict):
+                msgs = list(msgs.values())
+            msgs = [m for m in msgs if isinstance(m, dict)]
             if not POLL_STATE["first_dump_done"]:
                 POLL_STATE["first_dump_done"] = True
                 print(f"POLL muestra inicial ({len(msgs)}): {str(msgs)[:500]}")
-            now = max((m.get("timestamp", 0) for m in msgs), default=0)
+            now = max((_ts(m) for m in msgs), default=0)
             if POLL_STATE["last_ts"] is None:
                 POLL_STATE["last_ts"] = now
                 print(f"POLL init: {len(msgs)} mensajes previos ignorados")
             else:
-                nuevos = [m for m in msgs if m.get("timestamp", 0) > POLL_STATE["last_ts"]]
-                for m in sorted(nuevos, key=lambda x: x.get("timestamp", 0)):
-                    POLL_STATE["last_ts"] = max(POLL_STATE["last_ts"], m.get("timestamp", 0))
+                nuevos = [m for m in msgs if _ts(m) > POLL_STATE["last_ts"]]
+                for m in sorted(nuevos, key=_ts):
+                    POLL_STATE["last_ts"] = max(POLL_STATE["last_ts"], _ts(m))
                     text = _extract_text(m)
                     from_me = bool(m.get("fromMe", True))
                     if from_me and text and text not in RECENT_REPLIES:
                         print(f"POLL mensaje mío: {text[:100]}")
                         await process_my_message(text)
         except Exception as e:
-            print(f"POLL error: {e}")
+            print(f"POLL error: {type(e).__name__} {e}")
         await asyncio.sleep(10)
 
 
