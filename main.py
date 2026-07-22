@@ -11,8 +11,8 @@ load_dotenv()
 
 MAYTAPI_PRODUCT_ID = os.getenv("MAYTAPI_PRODUCT_ID")
 MAYTAPI_PHONE_ID = os.getenv("MAYTAPI_PHONE_ID")
-MAYTAPI_TOKEN = os.getenv("MAYTAPI_TOKEN")
-GROK_API_KEY = os.getenv("GROK_API_KEY")
+MAYTAPI_TOKEN = os.getenv("MAYTAPI_TOKEN") or os.getenv("MAYTAPI_API_TOKEN")
+GROK_API_KEY = os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY")
 MY_PHONE = os.getenv("MY_PHONE", "")
 
 SYSTEM_PROMPT = (

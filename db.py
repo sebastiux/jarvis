@@ -5,7 +5,11 @@ from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./jarvis_local.db")
+DATABASE_URL = (
+    os.getenv("DATABASE_URL")
+    or os.getenv("POSTGRES_URL")
+    or "sqlite:///./jarvis_local.db"
+)
 
 # Railway a veces entrega postgres:// en vez de postgresql://
 if DATABASE_URL.startswith("postgres://"):
