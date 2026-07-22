@@ -24,6 +24,9 @@ SYSTEM_PROMPT = (
 
 app = FastAPI()
 
+# Memoria corta de respuestas enviadas, para no reaccionar a nuestro propio eco
+RECENT_REPLIES = set()
+
 
 @app.on_event("startup")
 def startup():
@@ -57,6 +60,7 @@ async def ask_grok(phone: str, user_text: str) -> str:
 
 async def send_whatsapp(to: str, text: str):
     url = f"https://api.maytapi.com/api/{MAYTAPI_PRODUCT_ID}/{MAYTAPI_PHONE_ID}/sendMessage"
+    RECENT_REPLIES.add(text)
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.post(
             url,
@@ -71,17 +75,29 @@ async def webhook(request: Request):
     data = await request.json()
     print(f"WEBHOOK payload: {data}")
 
-    # Ignorar mensajes que no sean de texto o enviados por mí
     msg = data.get("message", {})
     if data.get("type") != "message" or msg.get("type") != "text":
-        print(f"IGNORADO: type={data.get('type')} msg_type={msg.get('type')}")
         return {"ok": True}
 
     text = msg.get("text", "").strip()
-    sender = data.get("user", {}).get("phone", "")
-    from_me = data.get("user", {}).get("fromMe") or data.get("fromMe")
-    if not text or from_me:
-        print(f"IGNORADO: text={text!r} fromMe={from_me}")
+    sender = str(data.get("user", {}).get("phone", ""))
+    from_me = bool(data.get("user", {}).get("fromMe") or data.get("fromMe"))
+
+    # Guard anti-bucle: si el mensaje saliente lo envió JARVIS, ignorarlo
+    if from_me and text in RECENT_REPLIES:
+        print("BLOQUEADO: eco de mi propia respuesta. Ignorado.")
+        return {"ok": True}
+
+    # REGLA DE SEGURIDAD ABSOLUTA: JARVIS solo habla conmigo.
+    # Si MY_PHONE no está configurado o el mensaje viene de cualquier
+    # otro número, se ignora por completo. NUNCA se responde a terceros.
+    if not MY_PHONE:
+        print("BLOQUEADO: MY_PHONE no configurado, nadie recibe respuestas")
+        return {"ok": True}
+    if sender != MY_PHONE:
+        print(f"BLOQUEADO: mensaje de {sender}, no es mi número. Ignorado.")
+        return {"ok": True}
+    if not text:
         return {"ok": True}
 
     db.save_message(sender, "user", text)
