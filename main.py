@@ -71,6 +71,16 @@ async def process_my_message(text: str):
     m = re.match(r"(?i)^\s*importa(r)?\s+(el\s+)?chat\s+(de|con)\s+(.+?)\s*$", text)
     if m:
         reply = await import_chat(m.group(4))
+    elif re.search(r"(?i)qu[eé]\s+tengo\s+(hoy|ma[ñn]ana)", text):
+        offset = 1 if re.search(r"(?i)ma[ñn]ana", text) else 0
+        eventos = cal_list(offset)
+        dia = "mañana" if offset else "hoy"
+        reply = (f"Tu agenda de {dia}:\n{eventos}") if eventos else "Calendar no está configurado todavía."
+    elif re.search(r"(?i)^\s*(cancela|elimina|borra)\s+", text):
+        query = re.sub(r"(?i)^\s*(cancela|elimina|borra)\s+(la |el |mi )?", "", text).strip()
+        reply = cal_cancel(query)
+    elif re.search(r"(?i)^\s*(agenda|ag[eé]ndame|programa|progr[aá]mame)\s+", text):
+        reply = await cal_create(text)
     elif re.search(r"(?i)c[oó]mo\s+dorm[ií]|mi\s+sue[ñn]o|mi\s+readiness|oura", text):
         data = await oura_summary()
         reply = ("Tus datos de Oura de hoy: " + data) if data else "No pude leer Oura (falta token o aún no hay datos de hoy)."
@@ -269,6 +279,135 @@ async def morning_loop():
         except Exception as e:
             print(f"OURA briefing error: {type(e).__name__} {e}")
         await asyncio.sleep(600)
+
+
+# ---------------- GOOGLE CALENDAR ----------------
+
+CALENDAR_ID = os.getenv("CALENDAR_ID", "")
+_calendar_service = None
+
+
+def get_calendar():
+    """Cliente de Calendar con cuenta de servicio. None si no está configurado."""
+    global _calendar_service
+    if _calendar_service:
+        return _calendar_service
+    sa_json = os.getenv("GOOGLE_SA_JSON", "").strip()
+    if not sa_json or not CALENDAR_ID:
+        return None
+    try:
+        import json
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        creds = service_account.Credentials.from_service_account_info(
+            json.loads(sa_json),
+            scopes=["https://www.googleapis.com/auth/calendar"],
+        )
+        _calendar_service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        return _calendar_service
+    except Exception as e:
+        print(f"CALENDAR config error: {e}")
+        return None
+
+
+def cal_list(day_offset: int = 0) -> str:
+    svc = get_calendar()
+    if not svc:
+        return ""
+    now = datetime.now(TZ_MX)
+    start = (now + timedelta(days=day_offset)).replace(hour=0, minute=0, second=0)
+    end = start + timedelta(days=1)
+    events = (
+        svc.events()
+        .list(
+            calendarId=CALENDAR_ID,
+            timeMin=start.isoformat(),
+            timeMax=end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+        .get("items", [])
+    )
+    if not events:
+        return "sin eventos"
+    lines = []
+    for e in events:
+        s = e["start"].get("dateTime", e["start"].get("date"))
+        title = e.get("summary", "(sin título)")
+        try:
+            h = datetime.fromisoformat(s).strftime("%H:%M")
+            lines.append(f"{h} - {title}")
+        except ValueError:
+            lines.append(f"Todo el día - {title}")
+    return "\n".join(lines)
+
+
+async def cal_create(instruction: str) -> str:
+    """Grok convierte lenguaje natural a JSON y se crea el evento."""
+    svc = get_calendar()
+    if not svc:
+        return "Calendar no está configurado todavía."
+    today = datetime.now(TZ_MX).date().isoformat()
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROK_API_KEY}"},
+            json={
+                "model": "grok-3-mini",
+                "messages": [
+                    {"role": "system", "content": (
+                        "Convierte la instrucción en un evento de calendario. "
+                        f"Hoy es {today} (zona America/Mexico_City). "
+                        'Responde SOLO con JSON: {"title": str, "date": "YYYY-MM-DD", '
+                        '"start": "HH:MM", "end": "HH:MM"}. '
+                        "Si falta la hora de fin, dura 1 hora. Sin markdown ni explicaciones."
+                    )},
+                    {"role": "user", "content": instruction},
+                ],
+            },
+        )
+        raw = r.json()["choices"][0]["message"]["content"].strip()
+    import json as _json
+    data = _json.loads(raw.strip("`").removeprefix("json").strip())
+    start = f"{data['date']}T{data['start']}:00"
+    end = f"{data['date']}T{data['end']}:00"
+    svc.events().insert(
+        calendarId=CALENDAR_ID,
+        body={
+            "summary": data["title"],
+            "start": {"dateTime": start, "timeZone": "America/Mexico_City"},
+            "end": {"dateTime": end, "timeZone": "America/Mexico_City"},
+        },
+    ).execute()
+    return f"Agendado: {data['title']} el {data['date']} de {data['start']} a {data['end']}."
+
+
+def cal_cancel(query: str) -> str:
+    svc = get_calendar()
+    if not svc:
+        return "Calendar no está configurado todavía."
+    now = datetime.now(TZ_MX)
+    events = (
+        svc.events()
+        .list(
+            calendarId=CALENDAR_ID,
+            timeMin=now.isoformat(),
+            timeMax=(now + timedelta(days=30)).isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            q=query,
+        )
+        .execute()
+        .get("items", [])
+    )
+    if not events:
+        return f"No encontré ningún evento próximo que coincida con '{query}'."
+    e = events[0]
+    svc.events().delete(calendarId=CALENDAR_ID, eventId=e["id"]).execute()
+    s = e["start"].get("dateTime", e["start"].get("date", ""))[:16]
+    return f"Cancelado: {e.get('summary', '(sin título)')} del {s}."
 
 
 _EMOJI_RE = re.compile(
