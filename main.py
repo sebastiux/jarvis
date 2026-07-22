@@ -58,32 +58,38 @@ async def ask_grok(phone: str, user_text: str) -> str:
 async def send_whatsapp(to: str, text: str):
     url = f"https://api.maytapi.com/api/{MAYTAPI_PRODUCT_ID}/{MAYTAPI_PHONE_ID}/sendMessage"
     async with httpx.AsyncClient(timeout=15) as client:
-        await client.post(
+        r = await client.post(
             url,
             headers={"x-maytapi-key": MAYTAPI_TOKEN},
             json={"to_number": to, "type": "text", "message": text},
         )
+        print(f"ENVIO a {to}: HTTP {r.status_code} {r.text[:300]}")
 
 
 @app.post("/webhook/maytapi")
 async def webhook(request: Request):
     data = await request.json()
+    print(f"WEBHOOK payload: {data}")
 
     # Ignorar mensajes que no sean de texto o enviados por mí
     msg = data.get("message", {})
     if data.get("type") != "message" or msg.get("type") != "text":
+        print(f"IGNORADO: type={data.get('type')} msg_type={msg.get('type')}")
         return {"ok": True}
 
     text = msg.get("text", "").strip()
     sender = data.get("user", {}).get("phone", "")
-    if not text or data.get("user", {}).get("fromMe"):
+    from_me = data.get("user", {}).get("fromMe") or data.get("fromMe")
+    if not text or from_me:
+        print(f"IGNORADO: text={text!r} fromMe={from_me}")
         return {"ok": True}
 
     db.save_message(sender, "user", text)
 
     try:
         reply = await ask_grok(sender, text)
-    except Exception:
+    except Exception as e:
+        print(f"ERROR Grok: {e}")
         reply = "Tuve un problema para pensar la respuesta. Intenta de nuevo en un momento."
 
     db.save_message(sender, "jarvis", reply)
