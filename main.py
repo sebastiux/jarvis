@@ -304,47 +304,87 @@ TZ_MX = timezone(timedelta(hours=-6))  # CDMX: sin horario de verano desde 2022
 
 
 async def oura_summary() -> str:
-    """Resumen de hoy: sueño, readiness y actividad. Texto plano para Grok o WhatsApp."""
+    """Resumen completo de Oura: fases de sueño, HRV, FC, readiness, actividad,
+    SpO2 y estrés. Texto plano para Grok o WhatsApp."""
     if not OURA_TOKEN:
         return ""
-    today = datetime.now(TZ_MX).date().isoformat()
+    hoy = datetime.now(TZ_MX).date()
+    ayer = (hoy - timedelta(days=1)).isoformat()
+    today = hoy.isoformat()
     headers = {"Authorization": f"Bearer {OURA_TOKEN}"}
     base = "https://api.ouraring.com/v2/usercollection"
     out = {}
     async with httpx.AsyncClient(timeout=20) as client:
-        for key, endpoint in (
-            ("sleep", "daily_sleep"),
-            ("readiness", "daily_readiness"),
-            ("activity", "daily_activity"),
+        for key, endpoint, params in (
+            ("daily_sleep", "daily_sleep", {"start_date": today, "end_date": today}),
+            ("readiness", "daily_readiness", {"start_date": today, "end_date": today}),
+            ("activity", "daily_activity", {"start_date": today, "end_date": today}),
+            ("sleep_period", "sleep", {"start_date": ayer, "end_date": today}),
+            ("spo2", "daily_spo2", {"start_date": today, "end_date": today}),
+            ("stress", "daily_stress", {"start_date": today, "end_date": today}),
         ):
             try:
-                r = await client.get(
-                    f"{base}/{endpoint}",
-                    headers=headers,
-                    params={"start_date": today, "end_date": today},
-                )
+                r = await client.get(f"{base}/{endpoint}", headers=headers, params=params)
                 docs = r.json().get("data", [])
-                if docs:
+                if key == "sleep_period":
+                    largos = [d for d in docs if d.get("type") == "long_sleep"]
+                    if largos:
+                        out[key] = largos[-1]
+                elif docs:
                     out[key] = docs[-1]
             except Exception as e:
                 print(f"OURA {endpoint} error: {e}")
     if not out:
         return ""
+
+    def hms(seg):
+        return f"{seg // 3600}h {(seg % 3600) // 60}m" if isinstance(seg, (int, float)) else "?"
+
     parts = []
-    if s := out.get("sleep"):
-        parts.append(f"Sueño: score {s.get('score')}")
-    if r_ := out.get("readiness"):
+    if s := out.get("daily_sleep"):
+        c = s.get("contributors") or {}
         parts.append(
-            f"Readiness: {r_.get('score')}, HRV balance: "
-            f"{(r_.get('contributors') or {}).get('hrv_balance')}, "
-            f"temperatura: {(r_.get('contributors') or {}).get('body_temperature')}"
+            f"SUEÑO score {s.get('score')} (profundo {c.get('deep_sleep')}, REM {c.get('rem_sleep')}, "
+            f"eficiencia {c.get('efficiency')}, latencia {c.get('latency')}, "
+            f"reparador {c.get('restfulness')}, horario {c.get('timing')}, total {c.get('total_sleep')})"
+        )
+    if p := out.get("sleep_period"):
+        parts.append(
+            f"Noche: {hms(p.get('total_sleep_duration'))} dormidos de {hms(p.get('time_in_bed'))} en cama | "
+            f"profundo {hms(p.get('deep_sleep_duration'))}, REM {hms(p.get('rem_sleep_duration'))}, "
+            f"ligero {hms(p.get('light_sleep_duration'))} | eficiencia {p.get('efficiency')}% | "
+            f"latencia {hms(p.get('latency'))} | FC prom {p.get('average_heart_rate')} mín {p.get('lowest_heart_rate')} | "
+            f"HRV prom {p.get('average_hrv')} | de {str(p.get('bedtime_start'))[11:16]} a {str(p.get('bedtime_end'))[11:16]}"
+        )
+    if r_ := out.get("readiness"):
+        c = r_.get("contributors") or {}
+        parts.append(
+            f"READINESS score {r_.get('score')} (FC reposo {c.get('resting_heart_rate')}, "
+            f"HRV {c.get('hrv_balance')}, temperatura {c.get('body_temperature')}, "
+            f"recuperación {c.get('recovery_index')}, actividad previa {c.get('previous_day_activity')}, "
+            f"equilibrio actividad {c.get('activity_balance')}, noche previa {c.get('previous_night')}) | "
+            f"desviación temperatura {r_.get('temperature_deviation')}°C"
         )
     if a := out.get("activity"):
+        c = a.get("contributors") or {}
         parts.append(
-            f"Actividad: score {a.get('score')}, pasos {a.get('steps')}, "
-            f"calorías activas {a.get('active_calories')}"
+            f"ACTIVIDAD score {a.get('score')} | pasos {a.get('steps')} | "
+            f"cal activas {a.get('active_calories')} / totales {a.get('total_calories')} | "
+            f"meta diaria {a.get('target_calories')} kcal | "
+            f"reposo {hms(a.get('resting_time'))}, inactivo {hms(a.get('inactivity_alerts') and 0 or a.get('sedentary_time'))} | "
+            f"equivalente caminata {a.get('equivalent_walking_distance')} m"
         )
-    return " | ".join(parts)
+    if o := out.get("spo2"):
+        parts.append(
+            f"SpO2 prom {o.get('spo2_percentage', {}).get('average') if isinstance(o.get('spo2_percentage'), dict) else o.get('spo2_percentage')}% | "
+            f"alteración respiratoria {o.get('breathing_disturbance_index')}"
+        )
+    if st := out.get("stress"):
+        parts.append(
+            f"ESTRÉS: alto {hms(st.get('stress_high'))}, recuperación alta {hms(st.get('recovery_high'))}, "
+            f"resumen del día: {st.get('day_summary')}"
+        )
+    return "\n".join(parts)
 
 
 async def oura_briefing_text() -> str:
