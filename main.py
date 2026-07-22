@@ -76,6 +76,8 @@ async def process_my_message(text: str):
         eventos = cal_list(offset)
         dia = "mañana" if offset else "hoy"
         reply = (f"Tu agenda de {dia}:\n{eventos}") if eventos else "Calendar no está configurado todavía."
+    elif re.search(r"(?i)(borr|elimin|limpi|vac)\w*\s+(todo\s+)?(el\s+|mi\s+)?calendario", text):
+        reply = cal_clear()
     elif re.search(r"(?i)^\s*(cancela|elimina|borra)\s+", text):
         query = re.sub(r"(?i)^\s*(cancela|elimina|borra)\s+(la |el |mi )?", "", text).strip()
         reply = cal_cancel(query)
@@ -396,6 +398,38 @@ async def cal_create(instruction: str) -> str:
         },
     ).execute()
     return f"Agendado: {data['title']} el {data['date']} de {data['start']} a {data['end']}."
+
+
+def cal_clear() -> str:
+    """Borra TODOS los eventos del calendario (ventana amplia)."""
+    svc = get_calendar()
+    if not svc:
+        return "Calendar no está configurado todavía."
+    now = datetime.now(TZ_MX)
+    count = 0
+    page_token = None
+    while True:
+        resp = (
+            svc.events()
+            .list(
+                calendarId=CALENDAR_ID,
+                timeMin=(now - timedelta(days=365)).isoformat(),
+                timeMax=(now + timedelta(days=365)).isoformat(),
+                singleEvents=True,
+                pageToken=page_token,
+            )
+            .execute()
+        )
+        for e in resp.get("items", []):
+            try:
+                svc.events().delete(calendarId=CALENDAR_ID, eventId=e["id"]).execute()
+                count += 1
+            except Exception:
+                pass
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return f"Listo. Borré {count} eventos de tu calendario. Cuando quieras armamos el nuevo."
 
 
 def cal_cancel(query: str) -> str:
