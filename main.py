@@ -415,9 +415,11 @@ async def cal_create(instruction: str) -> str:
     if not svc:
         return "Calendar no está configurado todavía."
     today = datetime.now(TZ_MX).date().isoformat()
-    # Contexto: últimos mensajes para entender "agrega lo que te pedí"
-    historial = db.recent_history(MY_PHONE, 8)
-    contexto = "\n".join(f"{'Yo' if m.role == 'user' else 'JARVIS'}: {m.text}" for m in historial)
+    # Contexto: SOLO el mensaje anterior (referencia para "agrega lo que te pedí"),
+    # nunca más atrás, para no re-agendar cosas viejas
+    historial = db.recent_history(MY_PHONE, 2)
+    previos = [m for m in historial if m.role == "user" and m.text != instruction]
+    contexto = f"Mensaje anterior: {previos[-1].text}" if previos else "(sin mensaje anterior)"
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             "https://api.x.ai/v1/chat/completions",
@@ -434,10 +436,11 @@ async def cal_create(instruction: str) -> str:
                         'Para repetición usa RRULE, ej. lunes a viernes: "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR". '
                         'Si dice "esta semana", usa UNTIL con el viernes de esta semana, ej. "RRULE:FREQ=DAILY;UNTIL=20260725T235959". '
                         "Sin markdown ni explicaciones. "
-                        "Si la petición se refiere a algo de la conversación reciente, úsala."
+                        "Crea eventos SOLO de la petición actual; el mensaje anterior es solo "
+                        "referencia por si la petición dice 'eso' o 'lo que te pedí'."
                     )},
                     {"role": "user", "content": (
-                        f"Conversación reciente:\n{contexto}\n\nPetición: {instruction}"
+                        f"{contexto}\nPetición actual: {instruction}"
                     )},
                 ],
             },
