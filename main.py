@@ -122,7 +122,11 @@ async def import_chat(query: str, limit: int = 40) -> str:
         cid = str(match.get("id"))
         r = await client.get(f"{base}/getMessages/{cid}", headers=headers)
         data = r.json()
-        msgs = data.get("messages") if isinstance(data, dict) else data
+        if isinstance(data, dict):
+            inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+            msgs = data.get("messages") or inner.get("messages") or []
+        else:
+            msgs = data
         if isinstance(msgs, dict):
             msgs = list(msgs.values())
         msgs = [m for m in (msgs or []) if isinstance(m, dict)]
@@ -479,6 +483,14 @@ def _extract_text(m: dict) -> str:
 
 
 POLL_STATE = {"last_ts": None, "first_dump_done": False}
+PROCESSED_IDS = set()
+
+
+def _msg_id(m: dict) -> str:
+    msg = m.get("message")
+    if isinstance(msg, dict):
+        return str(msg.get("_serialized") or msg.get("id") or "")
+    return ""
 
 
 def _ts(m: dict) -> float:
@@ -503,7 +515,8 @@ async def poll_self_chat():
                 await asyncio.sleep(10)
                 continue
             if isinstance(data, dict):
-                msgs = data.get("messages") or data.get("data") or []
+                inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+                msgs = data.get("messages") or inner.get("messages") or data.get("data") or []
             else:
                 msgs = data
             if isinstance(msgs, dict):
@@ -520,9 +533,14 @@ async def poll_self_chat():
                 nuevos = [m for m in msgs if _ts(m) > POLL_STATE["last_ts"]]
                 for m in sorted(nuevos, key=_ts):
                     POLL_STATE["last_ts"] = max(POLL_STATE["last_ts"], _ts(m))
+                    mid = _msg_id(m)
+                    if mid and mid in PROCESSED_IDS:
+                        continue
                     text = _extract_text(m)
                     from_me = bool(m.get("fromMe", True))
                     if from_me and text and text not in RECENT_REPLIES:
+                        if mid:
+                            PROCESSED_IDS.add(mid)
                         print(f"POLL mensaje mío: {text[:100]}")
                         await process_my_message(text)
         except Exception as e:
