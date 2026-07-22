@@ -56,9 +56,47 @@ async def startup():
         print(f"WARN: no se pudo inicializar la BD al arrancar: {e}")
     # Los self-chats no disparan webhook: hay que consultarlos periódicamente
     if MY_PHONE and MAYTAPI_TOKEN:
+        load_processed()
         asyncio.create_task(poll_self_chat())
         asyncio.create_task(proactive_loop())
         asyncio.create_task(morning_loop())
+
+
+INTENT_PROMPT = """Clasifica el mensaje de Sebastián para su asistente JARVIS.
+Responde SOLO con JSON: {"accion": "...", "parametro": "..."}
+
+Acciones posibles:
+- crear_eventos: quiere agendar, anotar o planear algo en su calendario (aunque no diga "agenda"). parametro: la petición completa.
+- ver_agenda: pregunta qué eventos tiene. parametro: "hoy" o "mañana".
+- cancelar_evento: cancelar/borrar UN evento específico. parametro: texto a buscar.
+- borrar_calendario: quiere vaciar TODO el calendario. parametro: "".
+- oura: pregunta por sueño, readiness, actividad, cómo durmió. parametro: "".
+- importar_chat: pide importar/revisar un chat con alguien. parametro: nombre del contacto.
+- chat: cualquier otra cosa. parametro: "".
+
+Solo JSON, sin markdown."""
+
+
+async def classify(text: str) -> dict:
+    import json as _json
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROK_API_KEY}"},
+                json={
+                    "model": "grok-3-mini",
+                    "messages": [
+                        {"role": "system", "content": INTENT_PROMPT},
+                        {"role": "user", "content": text},
+                    ],
+                },
+            )
+            raw = r.json()["choices"][0]["message"]["content"].strip()
+        return _json.loads(raw.strip("`").removeprefix("json").strip())
+    except Exception as e:
+        print(f"CLASSIFY error: {e}")
+        return {"accion": "chat", "parametro": ""}
 
 
 async def process_my_message(text: str):
@@ -68,23 +106,24 @@ async def process_my_message(text: str):
         return
     db.save_message(MY_PHONE, "user", text)
 
-    # Comando directo: "importa el chat de X"
-    m = re.match(r"(?i)^\s*importa(r)?\s+(el\s+)?chat\s+(de|con)\s+(.+?)\s*$", text)
-    if m:
-        reply = await import_chat(m.group(4))
-    elif re.search(r"(?i)qu[eé]\s+tengo\s+(hoy|ma[ñn]ana)", text):
-        offset = 1 if re.search(r"(?i)ma[ñn]ana", text) else 0
+    intent = await classify(text)
+    accion, param = intent.get("accion", "chat"), str(intent.get("parametro", ""))
+    print(f"INTENT: {accion} | {param[:80]}")
+
+    if accion == "importar_chat":
+        reply = await import_chat(param)
+    elif accion == "ver_agenda":
+        offset = 1 if "mañana" in param.lower() or "manana" in param.lower() else 0
         eventos = cal_list(offset)
         dia = "mañana" if offset else "hoy"
         reply = (f"Tu agenda de {dia}:\n{eventos}") if eventos else "Calendar no está configurado todavía."
-    elif re.search(r"(?i)(borr|elimin|limpi|vac)\w*\s+(todo\s+)?(el\s+|mi\s+)?calendario", text):
+    elif accion == "borrar_calendario":
         reply = cal_clear()
-    elif re.search(r"(?i)^\s*(cancela|elimina|borra)\s+", text):
-        query = re.sub(r"(?i)^\s*(cancela|elimina|borra)\s+(la |el |mi )?", "", text).strip()
-        reply = cal_cancel(query)
-    elif re.search(r"(?i)(agend|agreg|añad|program|planea|plan[eé]a|crea\b.*evento|pon.*calendario|aparta)", text):
-        reply = await cal_create(text)
-    elif re.search(r"(?i)c[oó]mo\s+dorm[ií]|mi\s+sue[ñn]o|mi\s+readiness|oura", text):
+    elif accion == "cancelar_evento":
+        reply = cal_cancel(param or text)
+    elif accion == "crear_eventos":
+        reply = await cal_create(param or text)
+    elif accion == "oura":
         data = await oura_summary()
         reply = ("Tus datos de Oura de hoy: " + data) if data else "No pude leer Oura (falta token o aún no hay datos de hoy)."
     else:
@@ -501,6 +540,23 @@ POLL_STATE = {"last_ts": None, "first_dump_done": False}
 PROCESSED_IDS = set()
 
 
+def load_processed():
+    import json as _json
+    global PROCESSED_IDS
+    try:
+        PROCESSED_IDS = set(_json.loads(db.get_state("processed_ids", "[]")))
+    except Exception:
+        PROCESSED_IDS = set()
+
+
+def save_processed():
+    import json as _json
+    ids = list(PROCESSED_IDS)[-300:]
+    PROCESSED_IDS.clear()
+    PROCESSED_IDS.update(ids)
+    db.set_state("processed_ids", _json.dumps(ids))
+
+
 def _msg_id(m: dict) -> str:
     msg = m.get("message")
     if isinstance(msg, dict):
@@ -554,8 +610,8 @@ async def poll_self_chat():
                     text = _extract_text(m)
                     from_me = bool(m.get("fromMe", True))
                     if from_me and text and text not in RECENT_REPLIES:
-                        if mid:
-                            PROCESSED_IDS.add(mid)
+                        PROCESSED_IDS.add(mid)
+                        save_processed()
                         print(f"POLL mensaje mío: {text[:100]}")
                         await process_my_message(text)
         except Exception as e:
