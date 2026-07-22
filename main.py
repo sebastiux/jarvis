@@ -283,7 +283,7 @@ async def morning_loop():
 
 # ---------------- GOOGLE CALENDAR ----------------
 
-CALENDAR_ID = os.getenv("CALENDAR_ID", "")
+CALENDAR_ID = os.getenv("CALENDAR_ID", "").strip().strip('"').strip("'")
 _calendar_service = None
 
 
