@@ -54,3 +54,16 @@ def recent_history(phone: str, limit: int = 40):
             .all()
         )
     return list(reversed(rows))
+
+
+def recent_observed(limit: int = 40):
+    """Últimos mensajes observados en chats de terceros (solo lectura)."""
+    with SessionLocal() as s:
+        rows = (
+            s.query(Message)
+            .filter(Message.role == "observed")
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    return list(reversed(rows))
