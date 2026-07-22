@@ -117,12 +117,17 @@ async def process_my_message(text: str):
         eventos = cal_list(offset)
         dia = "mañana" if offset else "hoy"
         reply = (f"Tu agenda de {dia}:\n{eventos}") if eventos else "Calendar no está configurado todavía."
-    elif accion == "borrar_calendario":
-        reply = cal_clear()
-    elif accion == "cancelar_evento":
-        reply = cal_cancel(param or text)
-    elif accion == "crear_eventos":
-        reply = await cal_create(param or text)
+    elif accion in ("borrar_calendario", "cancelar_evento", "crear_eventos"):
+        try:
+            if accion == "borrar_calendario":
+                reply = cal_clear()
+            elif accion == "cancelar_evento":
+                reply = cal_cancel(param or text)
+            else:
+                reply = await cal_create(param or text)
+        except Exception as e:
+            print(f"CALENDAR accion {accion} error: {e}")
+            reply = "No pude completar la operación en el calendario. Intenta de nuevo en un momento."
     elif accion == "oura":
         data = await oura_summary()
         reply = ("Tus datos de Oura de hoy: " + data) if data else "No pude leer Oura (falta token o aún no hay datos de hoy)."
@@ -450,10 +455,24 @@ async def cal_create(instruction: str) -> str:
             "start": {"dateTime": f"{ev['date']}T{ev['start']}:00", "timeZone": "America/Mexico_City"},
             "end": {"dateTime": f"{ev['date']}T{ev['end']}:00", "timeZone": "America/Mexico_City"},
         }
+        rep = ""
         if ev.get("recurrence"):
-            body["recurrence"] = [ev["recurrence"]]
-        svc.events().insert(calendarId=CALENDAR_ID, body=body).execute()
-        rep = " (recurrente)" if ev.get("recurrence") else ""
+            rrule = ev["recurrence"]
+            # Google exige UNTIL en UTC con Z final
+            rrule = re.sub(r"UNTIL=(\d{8}T\d{6})(?!Z)", r"UNTIL=\1Z", rrule)
+            body["recurrence"] = [rrule]
+            rep = " (recurrente)"
+        try:
+            svc.events().insert(calendarId=CALENDAR_ID, body=body).execute()
+        except Exception as e:
+            if "recurrence" in body:
+                # Si la regla falla, crear el evento simple para no perderlo
+                print(f"CAL recurrence inválida ({e}); creando evento simple")
+                body.pop("recurrence")
+                svc.events().insert(calendarId=CALENDAR_ID, body=body).execute()
+                rep = " (solo hoy, la recurrencia falló)"
+            else:
+                raise
         confirmaciones.append(f"- {ev['title']}: {ev['date']} {ev['start']}-{ev['end']}{rep}")
     return "Agendado:\n" + "\n".join(confirmaciones)
 
@@ -705,6 +724,11 @@ async def webhook(request: Request):
         return {"ok": True}
 
     if not text:
+        return {"ok": True}
+
+    # Si es MI mensaje, lo procesa el polling (evita doble procesamiento)
+    if _is_me(sender):
+        print("WEBHOOK: mensaje mío, lo toma el polling. Ignorado.")
         return {"ok": True}
 
     # MODO SILENCIOSO: los mensajes de otras personas/grupos (incluidos los
