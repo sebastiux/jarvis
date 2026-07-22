@@ -58,16 +58,35 @@ async def ask_grok(phone: str, user_text: str) -> str:
         return r.json()["choices"][0]["message"]["content"].strip()
 
 
-async def send_whatsapp(to: str, text: str):
+def _digits(phone: str) -> str:
+    return "".join(c for c in str(phone) if c.isdigit())
+
+
+async def send_whatsapp(text: str):
+    """Envía ÚNICAMENTE a MY_PHONE. No acepta destinatario: es imposible
+    enviar a otro número desde ninguna parte del código."""
+    if not MY_PHONE:
+        print("ENVIO ABORTADO: MY_PHONE no configurado")
+        return
     url = f"https://api.maytapi.com/api/{MAYTAPI_PRODUCT_ID}/{MAYTAPI_PHONE_ID}/sendMessage"
     RECENT_REPLIES.add(text)
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.post(
             url,
             headers={"x-maytapi-key": MAYTAPI_TOKEN},
-            json={"to_number": to, "type": "text", "message": text},
+            json={"to_number": MY_PHONE, "type": "text", "message": text},
         )
-        print(f"ENVIO a {to}: HTTP {r.status_code} {r.text[:300]}")
+        print(f"ENVIO a MI NUMERO: HTTP {r.status_code} {r.text[:300]}")
+
+
+def _is_me(sender: str) -> bool:
+    """Compara por sufijo de dígitos para tolerar prefijos/sufijos del payload."""
+    if not MY_PHONE:
+        return False
+    a, b = _digits(sender), _digits(MY_PHONE)
+    if not a or not b:
+        return False
+    return a.endswith(b[-10:]) or b.endswith(a[-10:])
 
 
 @app.post("/webhook/maytapi")
@@ -89,25 +108,25 @@ async def webhook(request: Request):
         return {"ok": True}
 
     # REGLA DE SEGURIDAD ABSOLUTA: JARVIS solo habla conmigo.
-    # Si MY_PHONE no está configurado o el mensaje viene de cualquier
-    # otro número, se ignora por completo. NUNCA se responde a terceros.
-    if not MY_PHONE:
-        print("BLOQUEADO: MY_PHONE no configurado, nadie recibe respuestas")
+    # 1) Interruptor maestro. 2) Solo mi número dispara respuesta.
+    # 3) El envío siempre va a MY_PHONE, jamás al remitente.
+    if os.getenv("JARVIS_DISABLED", "").lower() in ("1", "true", "si"):
+        print("BLOQUEADO: interruptor JARVIS_DISABLED activo")
         return {"ok": True}
-    if sender != MY_PHONE:
-        print(f"BLOQUEADO: mensaje de {sender}, no es mi número. Ignorado.")
+    if not _is_me(sender):
+        print(f"BLOQUEADO: remitente={sender!r} no coincide con MY_PHONE. Ignorado.")
         return {"ok": True}
     if not text:
         return {"ok": True}
 
-    db.save_message(sender, "user", text)
+    db.save_message(MY_PHONE, "user", text)
 
     try:
-        reply = await ask_grok(sender, text)
+        reply = await ask_grok(MY_PHONE, text)
     except Exception as e:
         print(f"ERROR Grok: {e}")
         reply = "Tuve un problema para pensar la respuesta. Intenta de nuevo en un momento."
 
-    db.save_message(sender, "jarvis", reply)
-    await send_whatsapp(sender, reply)
+    db.save_message(MY_PHONE, "jarvis", reply)
+    await send_whatsapp(reply)
     return {"ok": True}
