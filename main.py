@@ -2,6 +2,7 @@
 import asyncio
 import os
 import re
+from datetime import datetime, timezone, timedelta
 
 import httpx
 from fastapi import FastAPI, Request
@@ -56,6 +57,7 @@ async def startup():
     if MY_PHONE and MAYTAPI_TOKEN:
         asyncio.create_task(poll_self_chat())
         asyncio.create_task(proactive_loop())
+        asyncio.create_task(morning_loop())
 
 
 async def process_my_message(text: str):
@@ -69,6 +71,9 @@ async def process_my_message(text: str):
     m = re.match(r"(?i)^\s*importa(r)?\s+(el\s+)?chat\s+(de|con)\s+(.+?)\s*$", text)
     if m:
         reply = await import_chat(m.group(4))
+    elif re.search(r"(?i)c[oó]mo\s+dorm[ií]|mi\s+sue[ñn]o|mi\s+readiness|oura", text):
+        data = await oura_summary()
+        reply = ("Tus datos de Oura de hoy: " + data) if data else "No pude leer Oura (falta token o aún no hay datos de hoy)."
     else:
         try:
             reply = await ask_grok(MY_PHONE, text)
@@ -172,6 +177,98 @@ async def proactive_loop():
         except Exception as e:
             print(f"PROACTIVO error: {type(e).__name__} {e}")
         await asyncio.sleep(900)
+
+
+# ---------------- OURA ----------------
+
+OURA_TOKEN = os.getenv("OURA_TOKEN", "")
+TZ_MX = timezone(timedelta(hours=-6))  # CDMX: sin horario de verano desde 2022
+
+
+async def oura_summary() -> str:
+    """Resumen de hoy: sueño, readiness y actividad. Texto plano para Grok o WhatsApp."""
+    if not OURA_TOKEN:
+        return ""
+    today = datetime.now(TZ_MX).date().isoformat()
+    headers = {"Authorization": f"Bearer {OURA_TOKEN}"}
+    base = "https://api.ouraring.com/v2/usercollection"
+    out = {}
+    async with httpx.AsyncClient(timeout=20) as client:
+        for key, endpoint in (
+            ("sleep", "daily_sleep"),
+            ("readiness", "daily_readiness"),
+            ("activity", "daily_activity"),
+        ):
+            try:
+                r = await client.get(
+                    f"{base}/{endpoint}",
+                    headers=headers,
+                    params={"start_date": today, "end_date": today},
+                )
+                docs = r.json().get("data", [])
+                if docs:
+                    out[key] = docs[-1]
+            except Exception as e:
+                print(f"OURA {endpoint} error: {e}")
+    if not out:
+        return ""
+    parts = []
+    if s := out.get("sleep"):
+        parts.append(f"Sueño: score {s.get('score')}")
+    if r_ := out.get("readiness"):
+        parts.append(
+            f"Readiness: {r_.get('score')}, HRV balance: "
+            f"{(r_.get('contributors') or {}).get('hrv_balance')}, "
+            f"temperatura: {(r_.get('contributors') or {}).get('body_temperature')}"
+        )
+    if a := out.get("activity"):
+        parts.append(
+            f"Actividad: score {a.get('score')}, pasos {a.get('steps')}, "
+            f"calorías activas {a.get('active_calories')}"
+        )
+    return " | ".join(parts)
+
+
+async def oura_briefing_text() -> str:
+    data = await oura_summary()
+    if not data:
+        return "Buenos días. No pude leer los datos de Oura hoy."
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROK_API_KEY}"},
+            json={
+                "model": "grok-3-mini",
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": (
+                        "Es la mañana. Con estos datos de mi Oura, escribe mi briefing matutino: "
+                        "saluda, dime cómo dormí y mi readiness, y cómo conviene organizar mi día "
+                        "(sin consejos médicos). Datos: " + data
+                    )},
+                ],
+            },
+        )
+        return r.json()["choices"][0]["message"]["content"].strip()
+
+
+async def morning_loop():
+    """Briefing diario ~7:15 hora CDMX."""
+    while True:
+        try:
+            now = datetime.now(TZ_MX)
+            today = now.date().isoformat()
+            if now.hour == 7 and db.get_state("last_briefing") != today:
+                if OURA_TOKEN:
+                    text = await oura_briefing_text()
+                    text = strip_emojis(text)
+                    db.save_message(MY_PHONE, "jarvis", text)
+                    await send_whatsapp(text)
+                db.set_state("last_briefing", today)
+                print(f"OURA briefing enviado {today}")
+        except Exception as e:
+            print(f"OURA briefing error: {type(e).__name__} {e}")
+        await asyncio.sleep(600)
 
 
 _EMOJI_RE = re.compile(
