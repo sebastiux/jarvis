@@ -43,7 +43,7 @@ def save_message(phone: str, role: str, text: str):
         s.commit()
 
 
-def recent_history(phone: str, limit: int = 20):
+def recent_history(phone: str, limit: int = 40):
     """Últimos mensajes para darle contexto a Grok."""
     with SessionLocal() as s:
         rows = (

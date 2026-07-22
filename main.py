@@ -107,16 +107,24 @@ async def webhook(request: Request):
         print("BLOQUEADO: eco de mi propia respuesta. Ignorado.")
         return {"ok": True}
 
+    if not text:
+        return {"ok": True}
+
+    # MODO SILENCIOSO: los mensajes de otras personas/grupos solo se guardan
+    # para que JARVIS los lea y detecte cosas (reuniones, pagos, etc.).
+    # JAMÁS generan respuesta hacia ese chat.
+    if not _is_me(sender):
+        chat_id = str(data.get("user", {}).get("id") or sender)
+        db.save_message(chat_id, "observed", text)
+        print(f"OBSERVADO (sin responder): chat={chat_id}")
+        return {"ok": True}
+
+    # A partir de aquí el mensaje es MÍO (me escribo a mí mismo).
     # REGLA DE SEGURIDAD ABSOLUTA: JARVIS solo habla conmigo.
     # 1) Interruptor maestro. 2) Solo mi número dispara respuesta.
     # 3) El envío siempre va a MY_PHONE, jamás al remitente.
     if os.getenv("JARVIS_DISABLED", "").lower() in ("1", "true", "si"):
         print("BLOQUEADO: interruptor JARVIS_DISABLED activo")
-        return {"ok": True}
-    if not _is_me(sender):
-        print(f"BLOQUEADO: remitente={sender!r} no coincide con MY_PHONE. Ignorado.")
-        return {"ok": True}
-    if not text:
         return {"ok": True}
 
     db.save_message(MY_PHONE, "user", text)
