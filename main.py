@@ -301,7 +301,7 @@ def get_calendar():
         from googleapiclient.discovery import build
 
         creds = service_account.Credentials.from_service_account_info(
-            json.loads(sa_json),
+            _load_sa_json(sa_json),
             scopes=["https://www.googleapis.com/auth/calendar"],
         )
         _calendar_service = build("calendar", "v3", credentials=creds, cache_discovery=False)
@@ -309,6 +309,20 @@ def get_calendar():
     except Exception as e:
         print(f"CALENDAR config error: {e}")
         return None
+
+
+def _load_sa_json(raw: str) -> dict:
+    """Tolera JSON pegado con comillas envolventes, comillas escapadas
+    y saltos de línea reales dentro del private_key."""
+    import json
+
+    s = raw.strip()
+    if s.startswith('"') and s.endswith('"'):
+        s = s[1:-1]
+    s = s.replace('\\"', '"')
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = s.replace("\n", "\\n")  # la llave trae saltos reales; JSON los quiere escapados
+    return json.loads(s)
 
 
 def cal_list(day_offset: int = 0) -> str:
