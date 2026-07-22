@@ -44,10 +44,12 @@ def init_db():
     Base.metadata.create_all(engine)
     # Ampliar phone por si la tabla ya existía con varchar(32)
     try:
+        from sqlalchemy import text
         with engine.begin() as c:
-            c.execute("ALTER TABLE messages ALTER COLUMN phone TYPE varchar(120)")
-    except Exception:
-        pass
+            c.execute(text("ALTER TABLE messages ALTER COLUMN phone TYPE varchar(120)"))
+        print("DB: columna phone ampliada a 120")
+    except Exception as e:
+        print(f"DB: no se pudo ampliar phone (se truncarán etiquetas): {e}")
 
 
 def get_state(key: str, default: str = "") -> str:
@@ -85,9 +87,18 @@ def observed_since(last_id: int, limit: int = 50):
 
 
 def save_message(phone: str, role: str, text: str):
-    with SessionLocal() as s:
-        s.add(Message(phone=phone, role=role, text=text))
-        s.commit()
+    if len(phone) > 120:
+        phone = phone[:120]
+    try:
+        with SessionLocal() as s:
+            s.add(Message(phone=phone, role=role, text=text))
+            s.commit()
+    except Exception as e:
+        # Si la columna sigue en varchar(32), reintenta con etiqueta corta
+        print(f"DB save retry ({e}): etiqueta truncada")
+        with SessionLocal() as s:
+            s.add(Message(phone=phone[:32], role=role, text=text))
+            s.commit()
 
 
 def recent_history(phone: str, limit: int = 40):
