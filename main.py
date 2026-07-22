@@ -81,7 +81,7 @@ async def process_my_message(text: str):
     elif re.search(r"(?i)^\s*(cancela|elimina|borra)\s+", text):
         query = re.sub(r"(?i)^\s*(cancela|elimina|borra)\s+(la |el |mi )?", "", text).strip()
         reply = cal_cancel(query)
-    elif re.search(r"(?i)^\s*(agenda|ag[eé]ndame|programa|progr[aá]mame)\s+", text):
+    elif re.search(r"(?i)(agend|agreg|añad|program|planea|plan[eé]a|crea\b.*evento|pon.*calendario|aparta)", text):
         reply = await cal_create(text)
     elif re.search(r"(?i)c[oó]mo\s+dorm[ií]|mi\s+sue[ñn]o|mi\s+readiness|oura", text):
         data = await oura_summary()
@@ -365,11 +365,14 @@ def cal_list(day_offset: int = 0) -> str:
 
 
 async def cal_create(instruction: str) -> str:
-    """Grok convierte lenguaje natural a JSON y se crea el evento."""
+    """Grok convierte lenguaje natural a JSON y se crea el evento (con contexto reciente)."""
     svc = get_calendar()
     if not svc:
         return "Calendar no está configurado todavía."
     today = datetime.now(TZ_MX).date().isoformat()
+    # Contexto: últimos mensajes para entender "agrega lo que te pedí"
+    historial = db.recent_history(MY_PHONE, 8)
+    contexto = "\n".join(f"{'Yo' if m.role == 'user' else 'JARVIS'}: {m.text}" for m in historial)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             "https://api.x.ai/v1/chat/completions",
@@ -378,13 +381,16 @@ async def cal_create(instruction: str) -> str:
                 "model": "grok-3-mini",
                 "messages": [
                     {"role": "system", "content": (
-                        "Convierte la instrucción en un evento de calendario. "
+                        "Convierte la petición en UN evento de calendario. "
                         f"Hoy es {today} (zona America/Mexico_City). "
                         'Responde SOLO con JSON: {"title": str, "date": "YYYY-MM-DD", '
                         '"start": "HH:MM", "end": "HH:MM"}. '
-                        "Si falta la hora de fin, dura 1 hora. Sin markdown ni explicaciones."
+                        "Si falta la hora de fin, dura 1 hora. Sin markdown ni explicaciones. "
+                        "Si la petición se refiere a algo de la conversación reciente, úsala."
                     )},
-                    {"role": "user", "content": instruction},
+                    {"role": "user", "content": (
+                        f"Conversación reciente:\n{contexto}\n\nPetición: {instruction}"
+                    )},
                 ],
             },
         )
