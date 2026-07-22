@@ -27,14 +27,61 @@ class Message(Base):
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True)
-    phone = Column(String(32), index=True)          # de quién es el mensaje
-    role = Column(String(16))                       # "user" o "jarvis"
+    phone = Column(String(120), index=True)         # chat: número o "Nombre <id>"
+    role = Column(String(16))                       # "user", "jarvis" u "observed"
     text = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class State(Base):
+    __tablename__ = "state"
+
+    key = Column(String(64), primary_key=True)
+    value = Column(Text)
+
+
 def init_db():
     Base.metadata.create_all(engine)
+    # Ampliar phone por si la tabla ya existía con varchar(32)
+    try:
+        with engine.begin() as c:
+            c.execute("ALTER TABLE messages ALTER COLUMN phone TYPE varchar(120)")
+    except Exception:
+        pass
+
+
+def get_state(key: str, default: str = "") -> str:
+    with SessionLocal() as s:
+        row = s.get(State, key)
+        return row.value if row else default
+
+
+def set_state(key: str, value: str):
+    with SessionLocal() as s:
+        s.merge(State(key=key, value=value))
+        s.commit()
+
+
+def message_exists(phone: str, text: str) -> bool:
+    with SessionLocal() as s:
+        return (
+            s.query(Message)
+            .filter(Message.phone == phone, Message.text == text)
+            .first()
+            is not None
+        )
+
+
+def observed_since(last_id: int, limit: int = 50):
+    """Mensajes observados con id mayor a last_id, en orden."""
+    with SessionLocal() as s:
+        return (
+            s.query(Message)
+            .filter(Message.role == "observed", Message.id > last_id)
+            .order_by(Message.id.asc())
+            .limit(limit)
+            .all()
+        )
 
 
 def save_message(phone: str, role: str, text: str):

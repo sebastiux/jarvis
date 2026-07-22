@@ -55,6 +55,7 @@ async def startup():
     # Los self-chats no disparan webhook: hay que consultarlos periódicamente
     if MY_PHONE and MAYTAPI_TOKEN:
         asyncio.create_task(poll_self_chat())
+        asyncio.create_task(proactive_loop())
 
 
 async def process_my_message(text: str):
@@ -63,14 +64,114 @@ async def process_my_message(text: str):
         print("BLOQUEADO: interruptor JARVIS_DISABLED activo")
         return
     db.save_message(MY_PHONE, "user", text)
-    try:
-        reply = await ask_grok(MY_PHONE, text)
-    except Exception as e:
-        print(f"ERROR Grok: {e}")
-        reply = "Tuve un problema para pensar la respuesta. Intenta de nuevo en un momento."
+
+    # Comando directo: "importa el chat de X"
+    m = re.match(r"(?i)^\s*importa(r)?\s+(el\s+)?chat\s+(de|con)\s+(.+?)\s*$", text)
+    if m:
+        reply = await import_chat(m.group(4))
+    else:
+        try:
+            reply = await ask_grok(MY_PHONE, text)
+        except Exception as e:
+            print(f"ERROR Grok: {e}")
+            reply = "Tuve un problema para pensar la respuesta. Intenta de nuevo en un momento."
     reply = strip_emojis(reply)
     db.save_message(MY_PHONE, "jarvis", reply)
     await send_whatsapp(reply)
+
+
+async def import_chat(query: str, limit: int = 40) -> str:
+    """Busca una conversación por nombre/número e importa sus últimos mensajes."""
+    headers = {"x-maytapi-key": MAYTAPI_TOKEN}
+    base = f"https://api.maytapi.com/api/{MAYTAPI_PRODUCT_ID}/{MAYTAPI_PHONE_ID}"
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(f"{base}/getConversations", headers=headers)
+        convs = r.json()
+        if isinstance(convs, dict):
+            convs = convs.get("conversations") or convs.get("data") or []
+        q = query.lower()
+        match = None
+        for c in convs:
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("name") or "").lower()
+            cid = str(c.get("id") or "")
+            if q in name or _digits(q) and _digits(q) in _digits(cid):
+                match = c
+                break
+        if not match:
+            return f"No encontré ningún chat que coincida con '{query}'. Prueba con el nombre tal como lo tienes guardado."
+        name = str(match.get("name") or match.get("id"))
+        cid = str(match.get("id"))
+        r = await client.get(f"{base}/getMessages/{cid}", headers=headers)
+        data = r.json()
+        msgs = data.get("messages") if isinstance(data, dict) else data
+        if isinstance(msgs, dict):
+            msgs = list(msgs.values())
+        msgs = [m for m in (msgs or []) if isinstance(m, dict)]
+        label = f"{name} <{cid}>"
+        count = 0
+        for m in msgs[-limit:]:
+            t = _extract_text(m)
+            if t and not db.message_exists(label, t):
+                quien = "Yo" if m.get("fromMe") else name
+                db.save_message(label, "observed", f"{quien}: {t}")
+                count += 1
+        return f"Importé {count} mensajes del chat con {name}. Ya puedes preguntarme sobre esa conversación."
+
+
+PROACTIVE_PROMPT = """Eres el sistema de detección de JARVIS. Recibes mensajes recientes de los chats de WhatsApp de Sebastián con otras personas.
+
+Tu trabajo: detectar SOLO cosas importantes y accionables:
+- reuniones o citas acordadas (con fecha/hora)
+- pagos, cobros o vencimientos
+- entregas, deadlines o tareas comprometidas
+- vuelos, viajes, cumpleaños o eventos con fecha
+
+Si hay algo que valga la pena avisarle a Sebastián AHORA, escribe el aviso exacto que le enviarías: breve (máximo 5 líneas), natural, en español, sin emojis, empezando con "Detecté".
+Si no hay nada importante, responde exactamente: NADA
+No inventes nada que no esté en los mensajes."""
+
+
+async def proactive_loop():
+    """Cada 15 min revisa mensajes observados nuevos y avisa si detecta algo."""
+    await asyncio.sleep(60)  # dejar arrancar tranquilo
+    # Primera vez: arrancar desde lo más reciente para no avisar de historia vieja
+    if not db.get_state("last_analyzed_id"):
+        latest = db.recent_observed(1)
+        db.set_state("last_analyzed_id", str(latest[0].id if latest else 0))
+        print("PROACTIVO: estado inicializado")
+    while True:
+        try:
+            last_id = int(db.get_state("last_analyzed_id", "0"))
+            nuevos = db.observed_since(last_id, 50)
+            if nuevos:
+                db.set_state("last_analyzed_id", str(max(m.id for m in nuevos)))
+                # Analizar solo si hay al menos unos mensajes acumulados
+                lines = [f"[{m.phone}] {m.text}" for m in nuevos]
+                async with httpx.AsyncClient(timeout=30) as client:
+                    r = await client.post(
+                        "https://api.x.ai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {GROK_API_KEY}"},
+                        json={
+                            "model": "grok-3-mini",
+                            "messages": [
+                                {"role": "system", "content": PROACTIVE_PROMPT},
+                                {"role": "user", "content": "\n".join(lines)},
+                            ],
+                        },
+                    )
+                    alert = r.json()["choices"][0]["message"]["content"].strip()
+                if alert and not alert.upper().startswith("NADA"):
+                    alert = strip_emojis(alert)
+                    db.save_message(MY_PHONE, "jarvis", alert)
+                    await send_whatsapp(alert)
+                    print(f"PROACTIVO: {alert[:100]}")
+                else:
+                    print(f"PROACTIVO: nada relevante en {len(nuevos)} mensajes")
+        except Exception as e:
+            print(f"PROACTIVO error: {type(e).__name__} {e}")
+        await asyncio.sleep(900)
 
 
 _EMOJI_RE = re.compile(
