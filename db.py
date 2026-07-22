@@ -11,6 +11,9 @@ DATABASE_URL = (
     or "sqlite:///./jarvis_local.db"
 )
 
+# Limpiar saltos de línea, espacios y comillas que puedan venir al pegar la variable
+DATABASE_URL = DATABASE_URL.strip().strip('"').strip("'").strip()
+
 # Railway a veces entrega postgres:// en vez de postgresql://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
