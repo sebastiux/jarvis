@@ -27,7 +27,10 @@ app = FastAPI()
 
 @app.on_event("startup")
 def startup():
-    db.init_db()
+    try:
+        db.init_db()
+    except Exception as e:
+        print(f"WARN: no se pudo inicializar la BD al arrancar: {e}")
 
 
 @app.get("/")
