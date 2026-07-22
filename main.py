@@ -237,9 +237,12 @@ async def webhook(request: Request):
     # que YO envío a otros, que llegan con fromMe=true y user=destinatario)
     # solo se guardan para que JARVIS los lea. JAMÁS generan respuesta.
     if not _is_me(sender):
-        chat_id = str(data.get("user", {}).get("id") or sender)
-        db.save_message(chat_id, "observed", text)
-        print(f"OBSERVADO (sin responder): chat={chat_id}")
+        user = data.get("user", {})
+        name = str(user.get("name") or "").strip()
+        chat_id = str(user.get("id") or sender)
+        label = f"{name} <{chat_id}>" if name else chat_id
+        db.save_message(label, "observed", text)
+        print(f"OBSERVADO (sin responder): chat={label}")
         return {"ok": True}
 
     # Si algún día Maytapi sí notifica mensajes de mi self-chat:
