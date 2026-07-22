@@ -72,6 +72,8 @@ Acciones posibles:
 - borrar_calendario: quiere vaciar TODO el calendario. parametro: "".
 - oura: pregunta por sueño, readiness, actividad, cómo durmió. parametro: "".
 - importar_chat: pide importar/revisar un chat con alguien. parametro: nombre del contacto.
+- guardar_nota: el mensaje ES un link, o pide guardar/anotar algo para después. parametro: el contenido a guardar.
+- consultar_notas: pregunta por información, links o notas que guardó antes. parametro: tema a buscar.
 - chat: cualquier otra cosa. parametro: "".
 
 Solo JSON, sin markdown."""
@@ -106,6 +108,21 @@ async def process_my_message(text: str):
         return
     db.save_message(MY_PHONE, "user", text)
 
+    # Flujo pendiente: el mensaje anterior fue un link/nota y esta es su descripción
+    pending = db.get_state("pending_note")
+    if pending:
+        db.set_state("pending_note", "")
+        if re.match(r"(?i)^\s*(cancela|olvida|no)\s*$", text):
+            reply = "Ok, no guardé nada."
+        else:
+            kind = "link" if pending.startswith(("http://", "https://", "www.")) else "nota"
+            db.save_note(kind, pending, text)
+            reply = "Guardado. Cuando lo necesites, pregúntame."
+        reply = strip_emojis(reply)
+        db.save_message(MY_PHONE, "jarvis", reply)
+        await send_whatsapp(reply)
+        return
+
     intent = await classify(text)
     accion, param = intent.get("accion", "chat"), str(intent.get("parametro", ""))
     print(f"INTENT: {accion} | {param[:80]}")
@@ -128,6 +145,12 @@ async def process_my_message(text: str):
         except Exception as e:
             print(f"CALENDAR accion {accion} error: {e}")
             reply = "No pude completar la operación en el calendario. Intenta de nuevo en un momento."
+    elif accion == "guardar_nota":
+        contenido = param or text
+        db.set_state("pending_note", contenido)
+        reply = "¿Cómo lo describo? Dime en una línea qué es o para qué lo guardas."
+    elif accion == "consultar_notas":
+        reply = await answer_from_notes(param or text)
     elif accion == "oura":
         data = await oura_summary()
         reply = ("Tus datos de Oura de hoy: " + data) if data else "No pude leer Oura (falta token o aún no hay datos de hoy)."
@@ -184,6 +207,40 @@ async def import_chat(query: str, limit: int = 40) -> str:
                 db.save_message(label, "observed", f"{quien}: {t}")
                 count += 1
         return f"Importé {count} mensajes del chat con {name}. Ya puedes preguntarme sobre esa conversación."
+
+
+async def answer_from_notes(query: str) -> str:
+    """Responde preguntas usando las notas/links guardados en la BD."""
+    notes = db.search_notes(query, 10)
+    if not notes:
+        notes = db.recent_notes(10)
+        if not notes:
+            return "Aún no tengo nada guardado. Mándame un link o nota y lo registro."
+        listado = "\n".join(
+            f"- [{n.kind}] {n.description} ({n.content[:80]})" for n in notes
+        )
+        return f"No encontré nada sobre '{query}'. Esto es lo último que tengo guardado:\n{listado}"
+    contexto = "\n".join(
+        f"- [{n.kind}] descripción: {n.description} | contenido: {n.content}"
+        for n in notes
+    )
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROK_API_KEY}"},
+            json={
+                "model": "grok-3-mini",
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": (
+                        "Con estas notas mías guardadas, responde mi pregunta. "
+                        "Si pido el link, dámelo completo.\n\n"
+                        f"Notas:\n{contexto}\n\nPregunta: {query}"
+                    )},
+                ],
+            },
+        )
+        return r.json()["choices"][0]["message"]["content"].strip()
 
 
 PROACTIVE_PROMPT = """Eres el sistema de detección de JARVIS. Recibes mensajes recientes de los chats de WhatsApp de Sebastián con otras personas.

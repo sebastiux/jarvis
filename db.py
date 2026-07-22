@@ -40,6 +40,16 @@ class State(Base):
     value = Column(Text)
 
 
+class Note(Base):
+    __tablename__ = "notes"
+
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(16))                       # "link" o "nota"
+    content = Column(Text)                          # el link o texto original
+    description = Column(Text)                      # cómo lo describió el usuario
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 def init_db():
     Base.metadata.create_all(engine)
     # Ampliar phone por si la tabla ya existía con varchar(32)
@@ -84,6 +94,31 @@ def observed_since(last_id: int, limit: int = 50):
             .limit(limit)
             .all()
         )
+
+
+def save_note(kind: str, content: str, description: str):
+    with SessionLocal() as s:
+        s.add(Note(kind=kind, content=content, description=description))
+        s.commit()
+
+
+def search_notes(query: str, limit: int = 10):
+    """Busca notas por coincidencia simple en contenido o descripción."""
+    from sqlalchemy import or_
+    with SessionLocal() as s:
+        q = f"%{query}%"
+        return (
+            s.query(Note)
+            .filter(or_(Note.content.ilike(q), Note.description.ilike(q)))
+            .order_by(Note.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+
+def recent_notes(limit: int = 10):
+    with SessionLocal() as s:
+        return s.query(Note).order_by(Note.created_at.desc()).limit(limit).all()
 
 
 def save_message(phone: str, role: str, text: str):
