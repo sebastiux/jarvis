@@ -549,12 +549,30 @@ async def cal_create(instruction: str) -> str:
         )
         raw = r.json()["choices"][0]["message"]["content"].strip()
     import json as _json
-    data = _json.loads(raw.strip("`").removeprefix("json").strip())
+    try:
+        data = _json.loads(raw.strip("`").removeprefix("json").strip())
+    except Exception:
+        print(f"CAL_CREATE JSON inválido: {raw[:300]}")
+        return "No entendí bien qué agendar. Dime qué actividad, qué día y a qué hora."
     events = data.get("events") if isinstance(data, dict) else None
     if not events:  # tolerar formato de un solo evento
-        events = [data]
+        events = [data] if isinstance(data, dict) else []
+    # Validar campos mínimos; si falta info, pedir aclaración
+    validos = [
+        ev for ev in events
+        if isinstance(ev, dict) and ev.get("title") and ev.get("date") and ev.get("start")
+    ]
+    if not validos:
+        print(f"CAL_CREATE sin eventos válidos: {str(data)[:300]}")
+        return "Me faltan datos para agendar. Dime qué actividad, qué día y a qué hora (ej. 'entrenamiento hoy 5:35 a 7:30')."
+    for ev in validos:
+        ev.setdefault("end", "")
+        if not ev["end"]:
+            # 1 hora por defecto
+            h, m = map(int, ev["start"].split(":"))
+            ev["end"] = f"{h + 1:02d}:{m:02d}"
     confirmaciones = []
-    for ev in events:
+    for ev in validos:
         body = {
             "summary": ev["title"],
             "start": {"dateTime": f"{ev['date']}T{ev['start']}:00", "timeZone": "America/Mexico_City"},
