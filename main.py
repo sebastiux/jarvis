@@ -517,11 +517,15 @@ async def cal_create(instruction: str) -> str:
     if not svc:
         return "Calendar no está configurado todavía."
     today = datetime.now(TZ_MX).date().isoformat()
-    # Contexto: SOLO el mensaje anterior (referencia para "agrega lo que te pedí"),
-    # nunca más atrás, para no re-agendar cosas viejas
+    # Contexto: SOLO el mensaje anterior (sea mío o de JARVIS — p. ej. una
+    # alerta proactiva que el usuario quiere registrar), nunca más atrás
     historial = db.recent_history(MY_PHONE, 2)
-    previos = [m for m in historial if m.role == "user" and m.text != instruction]
-    contexto = f"Mensaje anterior: {previos[-1].text}" if previos else "(sin mensaje anterior)"
+    previos = [m for m in historial if m.text != instruction]
+    if previos:
+        ultimo = previos[-1]
+        contexto = f"Mensaje anterior ({'JARVIS' if ultimo.role == 'jarvis' else 'yo'}): {ultimo.text}"
+    else:
+        contexto = "(sin mensaje anterior)"
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             "https://api.x.ai/v1/chat/completions",
