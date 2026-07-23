@@ -26,6 +26,11 @@ PERSONALIDAD:
 - Directo: nada de relleno, disculpas largas ni frases corporativas.
 - Siempre en español.
 
+FORMATO (WhatsApp):
+- Usa *negritas* para títulos y datos clave (NO uses ** dobles).
+- Usa ```bloques monoespaciados``` para agendas, listas de datos o tablas.
+- Usa _cursivas_ para matices. Nunca uses markdown estándar (##, **, -).
+
 REGLAS DURAS:
 - PROHIBIDO usar emojis. Ninguno, jamás.
 - PROHIBIDO dar consejos médicos; solo adaptas la organización del día.
@@ -133,7 +138,7 @@ async def process_my_message(text: str):
         offset = 1 if "mañana" in param.lower() or "manana" in param.lower() else 0
         eventos = cal_list(offset)
         dia = "mañana" if offset else "hoy"
-        reply = (f"Tu agenda de {dia}:\n{eventos}") if eventos else "Calendar no está configurado todavía."
+        reply = (f"*Agenda de {dia}:*\n```\n{eventos}\n```") if eventos else "Calendar no está configurado todavía."
     elif accion in ("borrar_calendario", "cancelar_evento", "crear_eventos"):
         try:
             if accion == "borrar_calendario":
@@ -778,12 +783,24 @@ def _digits(phone: str) -> str:
     return "".join(c for c in str(phone) if c.isdigit())
 
 
+JARVIS_HEADER = "*J A R V I S*"
+
+
+def format_jarvis(text: str) -> str:
+    """Formato de casa: encabezado en negritas para distinguirlo de un
+    mensaje normal; el cuerpo usa formato WhatsApp (*, ```, >)."""
+    if text.startswith(JARVIS_HEADER):
+        return text
+    return f"{JARVIS_HEADER}\n{text}"
+
+
 async def send_whatsapp(text: str):
     """Envía ÚNICAMENTE a MY_PHONE. No acepta destinatario: es imposible
     enviar a otro número desde ninguna parte del código."""
     if not MY_PHONE:
         print("ENVIO ABORTADO: MY_PHONE no configurado")
         return
+    text = format_jarvis(text)
     url = f"https://api.maytapi.com/api/{MAYTAPI_PRODUCT_ID}/{MAYTAPI_PHONE_ID}/sendMessage"
     RECENT_REPLIES.add(text)
     async with httpx.AsyncClient(timeout=15) as client:
