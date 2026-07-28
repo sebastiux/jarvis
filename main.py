@@ -84,6 +84,31 @@ Acciones posibles:
 Solo JSON, sin markdown."""
 
 
+def fast_intent(text: str) -> dict | None:
+    """Reglas baratas para comandos obvios: evita una llamada a Grok.
+    Devuelve None si no hay coincidencia clara (entonces se clasifica con Grok)."""
+    t = text.strip()
+    low = t.lower()
+    if re.search(r"https?://|www\.", low):
+        return {"accion": "guardar_nota", "parametro": t}
+    if re.search(r"\b(agenda|agregar|agrega|anota|registra|apunta|prográmame|programame)\b", low) \
+            and not re.search(r"\b(qué|que|cuándo|cuando)\s+tengo\b", low):
+        return {"accion": "crear_eventos", "parametro": t}
+    if re.search(r"\b(qué|que)\s+tengo\b|\bmi\s+(agenda|calendario)\b|\beventos\s+de\s+(hoy|mañana|manana)\b", low):
+        dia = "mañana" if re.search(r"mañana|manana", low) else "hoy"
+        return {"accion": "ver_agenda", "parametro": dia}
+    if re.search(r"\bborra(r)?\s+(todo\s+)?(mi\s+)?calendario\b|\bvacía(r)?\s+(mi\s+)?calendario\b", low):
+        return {"accion": "borrar_calendario", "parametro": ""}
+    if re.search(r"\b(cancela|borra|elimina|quita)\b.*\b(evento|reunión|cita|junta)\b", low):
+        return {"accion": "cancelar_evento", "parametro": t}
+    if re.search(r"\boura\b|\bcómo\s+dorm[ií]\b|\bsueño\b|\breadiness\b|\bdescans(e|é)\b", low):
+        return {"accion": "oura", "parametro": ""}
+    if re.search(r"\bimporta(r)?\b.*\b(chat|conversación|conversacion)\b", low):
+        nombre = re.sub(r"(?i)\bimporta(r)?\b|\b(el|la)\b|\b(chat|conversación|conversacion)\b|\bcon\b|\bde\b", "", t).strip()
+        return {"accion": "importar_chat", "parametro": nombre or t}
+    return None
+
+
 async def classify(text: str) -> dict:
     import json as _json
     try:
@@ -128,7 +153,7 @@ async def process_my_message(text: str):
         await send_whatsapp(reply)
         return
 
-    intent = await classify(text)
+    intent = fast_intent(text) or await classify(text)
     accion, param = intent.get("accion", "chat"), str(intent.get("parametro", ""))
     print(f"INTENT: {accion} | {param[:80]}")
 
@@ -262,7 +287,8 @@ No inventes nada que no esté en los mensajes."""
 
 
 async def proactive_loop():
-    """Cada 15 min revisa mensajes observados nuevos y avisa si detecta algo."""
+    """Cada hora revisa mensajes observados nuevos y avisa si detecta algo.
+    Ahorro de tokens: solo corre con 5+ mensajes nuevos y se calla de 23:00 a 7:00 CDMX."""
     await asyncio.sleep(60)  # dejar arrancar tranquilo
     # Primera vez: arrancar desde lo más reciente para no avisar de historia vieja
     if not db.get_state("last_analyzed_id"):
@@ -271,35 +297,40 @@ async def proactive_loop():
         print("PROACTIVO: estado inicializado")
     while True:
         try:
-            last_id = int(db.get_state("last_analyzed_id", "0"))
-            nuevos = db.observed_since(last_id, 50)
-            if nuevos:
-                db.set_state("last_analyzed_id", str(max(m.id for m in nuevos)))
-                # Analizar solo si hay al menos unos mensajes acumulados
-                lines = [f"[{m.phone}] {m.text}" for m in nuevos]
-                async with httpx.AsyncClient(timeout=30) as client:
-                    r = await client.post(
-                        "https://api.x.ai/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {GROK_API_KEY}"},
-                        json={
-                            "model": "grok-3-mini",
-                            "messages": [
-                                {"role": "system", "content": PROACTIVE_PROMPT},
-                                {"role": "user", "content": "\n".join(lines)},
-                            ],
-                        },
-                    )
-                    alert = r.json()["choices"][0]["message"]["content"].strip()
-                if alert and not alert.upper().startswith("NADA"):
-                    alert = strip_emojis(alert)
-                    db.save_message(MY_PHONE, "jarvis", alert)
-                    await send_whatsapp(alert)
-                    print(f"PROACTIVO: {alert[:100]}")
-                else:
-                    print(f"PROACTIVO: nada relevante en {len(nuevos)} mensajes")
+            hora_mx = datetime.now(TZ_MX).hour
+            if hora_mx >= 23 or hora_mx < 7:
+                print("PROACTIVO: horario nocturno, pausado")
+            else:
+                last_id = int(db.get_state("last_analyzed_id", "0"))
+                nuevos = db.observed_since(last_id, 50)
+                if len(nuevos) >= 5:
+                    db.set_state("last_analyzed_id", str(max(m.id for m in nuevos)))
+                    lines = [f"[{m.phone}] {m.text[:300]}" for m in nuevos]
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        r = await client.post(
+                            "https://api.x.ai/v1/chat/completions",
+                            headers={"Authorization": f"Bearer {GROK_API_KEY}"},
+                            json={
+                                "model": "grok-3-mini",
+                                "messages": [
+                                    {"role": "system", "content": PROACTIVE_PROMPT},
+                                    {"role": "user", "content": "\n".join(lines)},
+                                ],
+                            },
+                        )
+                        alert = r.json()["choices"][0]["message"]["content"].strip()
+                    if alert and not alert.upper().startswith("NADA"):
+                        alert = strip_emojis(alert)
+                        db.save_message(MY_PHONE, "jarvis", alert)
+                        await send_whatsapp(alert)
+                        print(f"PROACTIVO: {alert[:100]}")
+                    else:
+                        print(f"PROACTIVO: nada relevante en {len(nuevos)} mensajes")
+                elif nuevos:
+                    print(f"PROACTIVO: solo {len(nuevos)} mensajes nuevos, esperando a acumular")
         except Exception as e:
             print(f"PROACTIVO error: {type(e).__name__} {e}")
-        await asyncio.sleep(900)
+        await asyncio.sleep(3600)
 
 
 # ---------------- OURA ----------------
@@ -771,13 +802,14 @@ def health():
 
 
 async def ask_grok(phone: str, user_text: str) -> str:
-    history = db.recent_history(phone)
+    history = db.recent_history(phone, 10)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     # Contexto de solo lectura: últimos mensajes observados en otros chats
-    observed = db.recent_observed(40)
+    # (recortado para no quemar tokens en cada mensaje)
+    observed = db.recent_observed(10)
     if observed:
-        lines = [f"[{m.phone}] {m.text}" for m in observed]
+        lines = [f"[{m.phone}] {m.text[:200]}" for m in observed]
         messages.append({
             "role": "system",
             "content": (
