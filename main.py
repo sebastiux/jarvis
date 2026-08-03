@@ -65,6 +65,7 @@ async def startup():
         asyncio.create_task(poll_self_chat())
         asyncio.create_task(proactive_loop())
         asyncio.create_task(morning_loop())
+        asyncio.create_task(intraday_loop())
 
 
 INTENT_PROMPT = """Clasifica el mensaje de Sebastián para su asistente JARVIS.
@@ -351,13 +352,15 @@ async def oura_summary() -> str:
     base = "https://api.ouraring.com/v2/usercollection"
     out = {}
     async with httpx.AsyncClient(timeout=20) as client:
+        # Ventana de 2 días: a primera hora Oura aún no genera el doc de "hoy";
+        # tomar el último disponible evita que el briefing salga con un día de atraso.
         for key, endpoint, params in (
-            ("daily_sleep", "daily_sleep", {"start_date": today, "end_date": today}),
-            ("readiness", "daily_readiness", {"start_date": today, "end_date": today}),
-            ("activity", "daily_activity", {"start_date": today, "end_date": today}),
+            ("daily_sleep", "daily_sleep", {"start_date": ayer, "end_date": today}),
+            ("readiness", "daily_readiness", {"start_date": ayer, "end_date": today}),
+            ("activity", "daily_activity", {"start_date": ayer, "end_date": today}),
             ("sleep_period", "sleep", {"start_date": ayer, "end_date": today}),
-            ("spo2", "daily_spo2", {"start_date": today, "end_date": today}),
-            ("stress", "daily_stress", {"start_date": today, "end_date": today}),
+            ("spo2", "daily_spo2", {"start_date": ayer, "end_date": today}),
+            ("stress", "daily_stress", {"start_date": ayer, "end_date": today}),
         ):
             try:
                 r = await client.get(f"{base}/{endpoint}", headers=headers, params=params)
@@ -463,6 +466,88 @@ async def morning_loop():
         except Exception as e:
             print(f"OURA briefing error: {type(e).__name__} {e}")
         await asyncio.sleep(600)
+
+
+async def intraday_loop():
+    """Cada 2 h (9:00-21:00 CDMX) revisa estrés y actividad de Oura y manda
+    nudges cortos. Sin Grok: reglas locales + plantillas, para no quemar tokens.
+    Máximo 1 aviso por categoría al día."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            now = datetime.now(TZ_MX)
+            today = now.date().isoformat()
+            if not (9 <= now.hour <= 21) or not OURA_TOKEN:
+                await asyncio.sleep(1800)
+                continue
+            sent = db.get_state(f"nudges_{today}") or ""
+            headers = {"Authorization": f"Bearer {OURA_TOKEN}"}
+            base = "https://api.ouraring.com/v2/usercollection"
+            nudge = None
+            async with httpx.AsyncClient(timeout=20) as client:
+                # Estrés del día
+                if "stress" not in sent:
+                    r = await client.get(f"{base}/daily_stress", headers=headers,
+                                         params={"start_date": today, "end_date": today})
+                    docs = r.json().get("data", [])
+                    if docs:
+                        st = docs[-1]
+                        alto = st.get("stress_high") or 0
+                        recup = st.get("recovery_high") or 0
+                        if st.get("day_summary") == "stressful" or (alto > 2 * 3600 and alto > 2 * recup):
+                            nudge = (
+                                "*Estrés elevado.*\n"
+                                f"Llevas {alto // 3600}h {(alto % 3600) // 60}m de estrés alto hoy. "
+                                "Conviene hacer una pausa: 5 minutos de respiración o caminar un poco."
+                            )
+                            sent += "stress,"
+                # Actividad / sedentarismo
+                if nudge is None and "sedentary" not in sent:
+                    r = await client.get(f"{base}/daily_activity", headers=headers,
+                                         params={"start_date": today, "end_date": today})
+                    docs = r.json().get("data", [])
+                    if docs:
+                        a = docs[-1]
+                        sedentario = a.get("sedentary_time") or 0
+                        pasos = a.get("steps") or 0
+                        if 12 <= now.hour <= 19 and sedentario > 3 * 3600:
+                            nudge = (
+                                "*Mucho tiempo sentado.*\n"
+                                f"Llevas {sedentario // 3600}h {(sedentario % 3600) // 60}m inactivo y {pasos} pasos. "
+                                "Buen momento para moverte 10 minutos."
+                            )
+                            sent += "sedentary,"
+                        elif now.hour >= 17 and pasos and pasos < 4000:
+                            nudge = (
+                                "*Actividad baja hoy.*\n"
+                                f"Vas en {pasos} pasos. Si puedes, cierra el día con una caminata corta."
+                            )
+                            sent += "sedentary,"
+                # Ritmo cardiaco actual elevado (fuera de ejercicio)
+                if nudge is None and "hr" not in sent:
+                    r = await client.get(f"{base}/heartrate", headers=headers,
+                                         params={"start_datetime": (now - timedelta(minutes=30)).isoformat(),
+                                                 "end_datetime": now.isoformat()})
+                    docs = r.json().get("data", [])
+                    vals = [d.get("bpm") for d in docs if isinstance(d.get("bpm"), (int, float))]
+                    if vals:
+                        prom = sum(vals) / len(vals)
+                        if prom > 100:
+                            nudge = (
+                                "*Ritmo cardiaco alto.*\n"
+                                f"Tu FC de los últimos 30 min promedia {int(prom)} bpm sin actividad registrada. "
+                                "Tómatelo con calma un momento."
+                            )
+                            sent += "hr,"
+            if nudge:
+                nudge = strip_emojis(nudge)
+                db.save_message(MY_PHONE, "jarvis", nudge)
+                await send_whatsapp(nudge)
+                db.set_state(f"nudges_{today}", sent)
+                print(f"NUDGE enviado: {nudge[:60]}")
+        except Exception as e:
+            print(f"NUDGE error: {type(e).__name__} {e}")
+        await asyncio.sleep(7200)
 
 
 # ---------------- GOOGLE CALENDAR ----------------
